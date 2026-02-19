@@ -17,8 +17,8 @@
 import { strict as assert } from 'node:assert';
 import { spawn } from 'node:child_process';
 import process from 'node:process';
+import net from 'node:net';
 
-const BASE_URL = process.env.SMOKE_BASE_URL ?? 'http://127.0.0.1:3000';
 const SERVER_START_CMD = process.env.SMOKE_SERVER_CMD ?? '';
 const SERVER_BUILD_CMD = process.env.SMOKE_BUILD_CMD ?? 'npm run build';
 const SERVER_START_TIMEOUT_MS = Number(process.env.SMOKE_SERVER_START_TIMEOUT_MS ?? 20_000);
@@ -35,8 +35,20 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function fetchJson(path, init) {
-  const res = await fetch(`${BASE_URL}${path}`, {
+async function getFreePort() {
+  return await new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.unref();
+    s.on('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
+}
+
+async function fetchJson(baseUrl, path, init) {
+  const res = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
       'content-type': 'application/json',
@@ -53,12 +65,12 @@ async function fetchJson(path, init) {
   return { res, body };
 }
 
-async function waitForHealthy(timeoutMs) {
+async function waitForHealthy(baseUrl, timeoutMs) {
   const start = nowMs();
   let lastErr;
   while (nowMs() - start < timeoutMs) {
     try {
-      const { res, body } = await fetchJson('/health', { method: 'GET' });
+      const { res, body } = await fetchJson(baseUrl, '/health', { method: 'GET' });
       if (res.ok) return body;
       lastErr = new Error(`non-2xx /health: ${res.status} ${JSON.stringify(body)}`);
     } catch (e) {
@@ -69,14 +81,14 @@ async function waitForHealthy(timeoutMs) {
   throw new Error(`timed out waiting for /health after ${timeoutMs}ms: ${lastErr?.message ?? lastErr}`);
 }
 
-function spawnServer(cmd) {
+function spawnServer(cmd, { port }) {
   // shell=true so callers can pass something like: "npm run dev" or "node dist/server.js"
   const child = spawn(cmd, {
     shell: true,
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,
-      PORT: process.env.PORT ?? '3000',
+      PORT: String(port),
       HOST: process.env.HOST ?? '127.0.0.1',
     },
   });
@@ -88,7 +100,19 @@ function spawnServer(cmd) {
   return { child, logs };
 }
 
+function normalizeResults(body) {
+  const r = body?.results ?? body;
+  return Array.isArray(r) ? r : [];
+}
+
+function toIdSet(results) {
+  return new Set(results.map((r) => r.id ?? r.documentId).filter(Boolean));
+}
+
 async function main() {
+  const port = process.env.PORT ? Number(process.env.PORT) : await getFreePort();
+  const baseUrl = process.env.SMOKE_BASE_URL ?? `http://127.0.0.1:${port}`;
+
   let server;
   let serverLogs;
 
@@ -100,71 +124,72 @@ async function main() {
       b.on('error', reject);
     });
 
-    ({ child: server, logs: serverLogs } = spawnServer(SERVER_START_CMD));
+    ({ child: server, logs: serverLogs } = spawnServer(SERVER_START_CMD, { port }));
   }
 
   try {
-    const health = await waitForHealthy(SERVER_START_TIMEOUT_MS);
+    const health = await waitForHealthy(baseUrl, SERVER_START_TIMEOUT_MS);
     assert.ok(health, 'health response should be non-empty');
 
     // Ingest a few docs
     const docs = [
-      { id: 'doc-1', title: 'Alpha', body: 'hello world alpha' },
-      { id: 'doc-2', title: 'Beta', body: 'hello world beta' },
-      { id: 'doc-3', title: 'Prefix', body: 'prelude prefixing prefabricated' },
+      { id: 'doc-1', text: 'hello world alpha', metadata: { title: 'Alpha' } },
+      { id: 'doc-2', text: 'hello world beta', metadata: { title: 'Beta' } },
+      { id: 'doc-3', text: 'prelude prefixing prefabricated', metadata: { title: 'Prefix' } },
     ];
 
-    // Expectation: POST /documents accepts { documents: [...] }
-    // If Kael lands a slightly different shape, we can adjust quickly.
-    const ing = await fetchJson('/documents', {
+    const ing = await fetchJson(baseUrl, '/documents', {
       method: 'POST',
       body: JSON.stringify({ documents: docs }),
     });
     assert.ok(ing.res.ok, `POST /documents should succeed: ${ing.res.status} ${JSON.stringify(ing.body)}`);
 
-    // fulltext search
-    const s1 = await fetchJson('/search', {
-      method: 'POST',
-      body: JSON.stringify({ query: 'alpha', mode: 'fulltext', limit: 10 }),
-    });
-    assert.ok(s1.res.ok, `POST /search fulltext should succeed: ${s1.res.status} ${JSON.stringify(s1.body)}`);
-    assert.ok(Array.isArray(s1.body?.results ?? s1.body), 'search results should be an array (or in .results)');
-    const r1 = (s1.body?.results ?? s1.body);
-    assert.ok(r1.some((r) => (r.id ?? r.documentId) === 'doc-1'), 'fulltext search should include doc-1');
+    // Deterministic: retry search briefly to allow async indexing.
+    const searchUntil = async ({ query, mode, topK, expectId, timeoutMs = 5_000 }) => {
+      const start = nowMs();
+      let lastBody;
+      while (nowMs() - start < timeoutMs) {
+        const s = await fetchJson(baseUrl, '/search', {
+          method: 'POST',
+          body: JSON.stringify({ query, mode, topK }),
+        });
+        assert.ok(s.res.ok, `POST /search should succeed: ${s.res.status} ${JSON.stringify(s.body)}`);
+        lastBody = s.body;
+        const ids = toIdSet(normalizeResults(s.body));
+        if (ids.has(expectId)) return { body: s.body, ids };
+        await sleep(200);
+      }
+      throw new Error(`expected search(${mode}:${query}) to include ${expectId} within ${timeoutMs}ms; last body: ${JSON.stringify(lastBody)}`);
+    };
 
-    // prefix search
-    const s2 = await fetchJson('/search', {
-      method: 'POST',
-      body: JSON.stringify({ query: 'pre', mode: 'prefix', limit: 10 }),
-    });
-    assert.ok(s2.res.ok, `POST /search prefix should succeed: ${s2.res.status} ${JSON.stringify(s2.body)}`);
-    const r2 = (s2.body?.results ?? s2.body);
-    assert.ok(r2.some((r) => (r.id ?? r.documentId) === 'doc-3'), 'prefix search should include doc-3');
+    const ft = await searchUntil({ query: 'alpha', mode: 'fulltext', topK: 10, expectId: 'doc-1' });
+    assert.deepEqual([...ft.ids].sort(), ['doc-1'], 'fulltext "alpha" should deterministically return only doc-1');
+
+    const px = await searchUntil({ query: 'pre', mode: 'prefix', topK: 10, expectId: 'doc-3' });
+    assert.deepEqual([...px.ids].sort(), ['doc-3'], 'prefix "pre" should deterministically return only doc-3');
 
     if (PERF_ENABLED) {
-      // Ingest PERF_DOCS docs in a single request (server may chunk internally).
       const bigDocs = Array.from({ length: PERF_DOCS }, (_, i) => ({
         id: `perf-${i}`,
-        title: `Perf ${i}`,
-        body: `lorem ipsum token${i % 1000} commonterm`,
+        text: `lorem ipsum token${i % 1000} commonterm`,
       }));
 
-      const ing2 = await fetchJson('/documents', {
+      const ing2 = await fetchJson(baseUrl, '/documents', {
         method: 'POST',
         body: JSON.stringify({ documents: bigDocs }),
       });
       assert.ok(ing2.res.ok, `perf ingest should succeed: ${ing2.res.status} ${JSON.stringify(ing2.body)}`);
 
       // warmup
-      await fetchJson('/search', {
+      await fetchJson(baseUrl, '/search', {
         method: 'POST',
-        body: JSON.stringify({ query: 'commonterm', mode: 'fulltext', limit: 10 }),
+        body: JSON.stringify({ query: 'commonterm', mode: 'fulltext', topK: 10 }),
       });
 
       const t0 = nowMs();
-      const q = await fetchJson('/search', {
+      const q = await fetchJson(baseUrl, '/search', {
         method: 'POST',
-        body: JSON.stringify({ query: 'token42', mode: 'fulltext', limit: 10 }),
+        body: JSON.stringify({ query: 'token42', mode: 'fulltext', topK: 10 }),
       });
       const dt = nowMs() - t0;
 
