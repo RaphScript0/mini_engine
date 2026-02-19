@@ -20,6 +20,7 @@ import process from 'node:process';
 
 const BASE_URL = process.env.SMOKE_BASE_URL ?? 'http://127.0.0.1:3000';
 const SERVER_START_CMD = process.env.SMOKE_SERVER_CMD ?? '';
+const SERVER_BUILD_CMD = process.env.SMOKE_BUILD_CMD ?? 'npm run build';
 const SERVER_START_TIMEOUT_MS = Number(process.env.SMOKE_SERVER_START_TIMEOUT_MS ?? 20_000);
 
 const PERF_ENABLED = (process.env.SMOKE_PERF ?? '').toLowerCase() === '1' || (process.env.SMOKE_PERF ?? '').toLowerCase() === 'true';
@@ -92,6 +93,13 @@ async function main() {
   let serverLogs;
 
   if (SERVER_START_CMD) {
+    // Build first so dist/* exists.
+    await new Promise((resolve, reject) => {
+      const b = spawn(SERVER_BUILD_CMD, { shell: true, stdio: 'inherit', env: process.env });
+      b.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`build failed: ${SERVER_BUILD_CMD} (exit ${code})`))));
+      b.on('error', reject);
+    });
+
     ({ child: server, logs: serverLogs } = spawnServer(SERVER_START_CMD));
   }
 
