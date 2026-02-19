@@ -36,4 +36,7 @@ jobs:
         run: npm test
 
       - name: Smoke
+        env:
+          SMOKE_BUILD_CMD: npm run build
+          SMOKE_SERVER_CMD: node dist/server.js
         run: npm run smoke

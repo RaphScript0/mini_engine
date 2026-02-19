@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { PROBLEM_CONTENT_TYPE, problem, type FieldError } from "./problem.js";
 import { asInt, asString, isRecord, pushErr } from "./validation.js";
-import { createInMemoryEngine, decodeCursor, encodeCursor, type Engine } from "./engine.js";
+import { createInMemoryEngine, decodeCursor, type Engine } from "./engine.js";
 
 const SERVICE = "mini_engine";
 const VERSION = "0.1.0";
@@ -134,14 +134,14 @@ export function createServer(opts: ServerOptions = {}): http.Server {
         const mode = asString(body.mode) ?? "fulltext";
         if (mode !== "fulltext" && mode !== "prefix") pushErr(errors, "$.mode", "must be one of: fulltext, prefix");
 
-        let cursor: string | undefined;
+        let cursorOffset: number | undefined;
         if (isRecord(body.page) && body.page.cursor != null) {
           const cursorStr = asString(body.page.cursor);
           if (!cursorStr) {
             pushErr(errors, "$.page.cursor", "must be a string");
           } else {
             try {
-              cursor = decodeCursor(cursorStr).token;
+              cursorOffset = decodeCursor(cursorStr).offset;
             } catch {
               pushErr(errors, "$.page.cursor", "invalid cursor");
             }
@@ -152,10 +152,10 @@ export function createServer(opts: ServerOptions = {}): http.Server {
           return sendProblem(res, 400, problem({ status: 400, code: "INVALID_ARGUMENT", detail: "invalid request", instance: url.pathname, requestId, errors }));
         }
 
-        const r = engine.search({ query: query!, topK, mode: mode as "fulltext" | "prefix", cursor });
+        const r = engine.search({ query: query!, topK, mode: mode as "fulltext" | "prefix", cursorOffset });
         return sendJson(res, 200, {
           results: r.results.map((x) => ({ id: x.id, score: x.score, highlights: [], metadata: x.metadata })),
-          page: { nextCursor: r.nextCursor ? encodeCursor({ token: r.nextCursor }) : null },
+          page: { nextCursor: r.nextCursor },
           tookMs: Date.now() - started,
         });
       }
