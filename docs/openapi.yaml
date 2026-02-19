@@ -1,0 +1,530 @@
+openapi: 3.0.3
+info:
+  title: mini_engine API
+  version: 0.1.0
+  description: |
+    Phase 1 HTTP API contract for indexing and search.
+
+    Notes:
+    - All endpoints are JSON over HTTP.
+    - Errors are returned as `application/problem+json`.
+servers:
+  - url: http://localhost:3000
+    description: Local dev
+
+tags:
+  - name: Health
+  - name: Documents
+  - name: Search
+  - name: Observability
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              examples:
+                ok:
+                  value:
+                    status: ok
+                    service: mini_engine
+                    version: 0.1.0
+                    uptimeMs: 123456
+        '503':
+          description: Service unavailable
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /metrics:
+    get:
+      tags: [Observability]
+      summary: Prometheus metrics
+      operationId: getMetrics
+      description: |
+        Exposes Prometheus-compatible metrics.
+
+        If metrics are not enabled, respond with 404.
+      responses:
+        '200':
+          description: Metrics payload
+          content:
+            text/plain; version=0.0.4:
+              schema:
+                type: string
+              examples:
+                example:
+                  value: |
+                    # HELP http_requests_total Total number of HTTP requests
+                    # TYPE http_requests_total counter
+                    http_requests_total{method="GET",path="/health",status="200"} 12
+        '404':
+          description: Metrics not enabled
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /documents:
+    post:
+      tags: [Documents]
+      summary: Bulk ingest documents
+      operationId: postDocuments
+      description: |
+        Adds/replaces documents in the index.
+
+        Idempotency: a document `id` is unique; ingesting the same `id` again replaces its content/metadata.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkIngestRequest'
+            examples:
+              minimal:
+                value:
+                  documents:
+                    - id: doc_1
+                      text: "hello world"
+                    - id: doc_2
+                      text: "hello there"
+              withMetadata:
+                value:
+                  documents:
+                    - id: product:sku123
+                      text: "red running shoes"
+                      metadata:
+                        category: shoes
+                        brand: Acme
+                  options:
+                    onDuplicate: replace
+      responses:
+        '200':
+          description: All documents were ingested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkIngestResponse'
+              examples:
+                ok:
+                  value:
+                    ingested: 2
+                    failed: 0
+                    failures: []
+        '207':
+          description: Partial success (some documents failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkIngestResponse'
+              examples:
+                partial:
+                  value:
+                    ingested: 1
+                    failed: 1
+                    failures:
+                      - index: 1
+                        id: doc_2
+                        code: INVALID_ARGUMENT
+                        message: "text must be non-empty"
+        '400':
+          description: Invalid request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '413':
+          description: Payload too large
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '415':
+          description: Unsupported media type
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /search:
+    post:
+      tags: [Search]
+      summary: Search documents
+      operationId: postSearch
+      description: |
+        Executes a search query.
+
+        Supports:
+        - `mode=fulltext` for standard token matching.
+        - `mode=prefix` for prefix matching (typeahead/autocomplete).
+
+        Pagination: cursor-based via `page.cursor`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+            examples:
+              fulltext:
+                value:
+                  query: "hello world"
+                  topK: 10
+                  mode: fulltext
+              prefix:
+                value:
+                  query: "hel"
+                  topK: 5
+                  mode: prefix
+              withCursor:
+                value:
+                  query: "shoes"
+                  topK: 10
+                  mode: fulltext
+                  page:
+                    cursor: "eyJvZmZzZXQiOjEwfQ=="
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+              examples:
+                ok:
+                  value:
+                    results:
+                      - id: doc_2
+                        score: 0.82
+                        highlights:
+                          - field: text
+                            snippets: ["...hello there..."]
+                        metadata:
+                          category: greeting
+                      - id: doc_1
+                        score: 0.77
+                        highlights: []
+                    page:
+                      nextCursor: null
+                    tookMs: 3
+        '400':
+          description: Invalid request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '415':
+          description: Unsupported media type
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Unprocessable request (semantically invalid)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '429':
+          description: Rate limited
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+          example: mini_engine
+        version:
+          type: string
+          example: 0.1.0
+        uptimeMs:
+          type: integer
+          format: int64
+          minimum: 0
+
+    BulkIngestRequest:
+      type: object
+      additionalProperties: false
+      required: [documents]
+      properties:
+        documents:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/DocumentInput'
+        options:
+          $ref: '#/components/schemas/BulkIngestOptions'
+
+    BulkIngestOptions:
+      type: object
+      additionalProperties: false
+      properties:
+        onDuplicate:
+          type: string
+          description: What to do when a document id already exists.
+          enum: [replace, skip]
+          default: replace
+
+    DocumentInput:
+      type: object
+      additionalProperties: false
+      required: [id, text]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Client-supplied unique identifier.
+        text:
+          type: string
+          minLength: 1
+          maxLength: 200000
+          description: The content to index.
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    Metadata:
+      type: object
+      description: Arbitrary JSON object stored alongside the document.
+      additionalProperties:
+        oneOf:
+          - type: string
+          - type: number
+          - type: integer
+          - type: boolean
+          - type: object
+          - type: array
+
+    BulkIngestResponse:
+      type: object
+      additionalProperties: false
+      required: [ingested, failed, failures]
+      properties:
+        ingested:
+          type: integer
+          format: int32
+          minimum: 0
+        failed:
+          type: integer
+          format: int32
+          minimum: 0
+        failures:
+          type: array
+          items:
+            $ref: '#/components/schemas/IngestFailure'
+
+    IngestFailure:
+      type: object
+      additionalProperties: false
+      required: [index, code, message]
+      properties:
+        index:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Index into the submitted `documents[]` array.
+        id:
+          type: string
+          nullable: true
+          description: The document id if it was parseable.
+        code:
+          type: string
+          example: INVALID_ARGUMENT
+        message:
+          type: string
+
+    SearchRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 4096
+        topK:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 100
+          default: 10
+        mode:
+          type: string
+          enum: [fulltext, prefix]
+          default: fulltext
+        filters:
+          $ref: '#/components/schemas/Filters'
+        return:
+          $ref: '#/components/schemas/ReturnSpec'
+        page:
+          $ref: '#/components/schemas/PageRequest'
+
+    Filters:
+      type: object
+      description: |
+        Metadata filtering. Minimal contract for Phase 1.
+
+        Implementations may only support equality matching initially.
+      additionalProperties: false
+      properties:
+        equals:
+          type: object
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: number
+              - type: integer
+              - type: boolean
+
+    ReturnSpec:
+      type: object
+      additionalProperties: false
+      properties:
+        includeMetadata:
+          type: boolean
+          default: true
+        includeHighlights:
+          type: boolean
+          default: false
+
+    PageRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        cursor:
+          type: string
+          description: Opaque cursor returned by the previous search.
+
+    SearchResponse:
+      type: object
+      additionalProperties: false
+      required: [results, page, tookMs]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchResult'
+        page:
+          $ref: '#/components/schemas/PageResponse'
+        tookMs:
+          type: integer
+          format: int32
+          minimum: 0
+
+    PageResponse:
+      type: object
+      additionalProperties: false
+      required: [nextCursor]
+      properties:
+        nextCursor:
+          type: string
+          nullable: true
+          description: Opaque cursor for fetching the next page, or null if none.
+
+    SearchResult:
+      type: object
+      additionalProperties: false
+      required: [id, score]
+      properties:
+        id:
+          type: string
+        score:
+          type: number
+          format: double
+          description: Higher is better.
+        highlights:
+          type: array
+          items:
+            $ref: '#/components/schemas/Highlight'
+        metadata:
+          $ref: '#/components/schemas/Metadata'
+
+    Highlight:
+      type: object
+      additionalProperties: false
+      required: [field, snippets]
+      properties:
+        field:
+          type: string
+          example: text
+        snippets:
+          type: array
+          items:
+            type: string
+
+    Problem:
+      type: object
+      description: RFC 7807 problem details
+      additionalProperties: false
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://errors.mini-engine.local/invalid-argument
+        title:
+          type: string
+          example: Invalid argument
+        status:
+          type: integer
+          format: int32
+          example: 400
+        detail:
+          type: string
+          example: query must be non-empty
+        instance:
+          type: string
+          format: uri
+          example: /search
+        code:
+          type: string
+          description: Stable machine-readable error code
+          example: INVALID_ARGUMENT
+        requestId:
+          type: string
+          description: Correlation id for debugging
+          example: 01HZY8T9Y4TRN9F4ZYKQ8V6A3B
+        errors:
+          type: array
+          description: Optional list of field-level validation errors
+          items:
+            $ref: '#/components/schemas/FieldError'
+
+    FieldError:
+      type: object
+      additionalProperties: false
+      required: [path, message]
+      properties:
+        path:
+          type: string
+          example: $.documents[1].text
+        message:
+          type: string
+          example: must be non-empty
