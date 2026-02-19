@@ -6,7 +6,10 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "echo \"(no lint yet)\""
+    "lint": "echo \"(no lint yet)\"",
+    "test": "echo \"(no tests yet)\"",
+    "smoke": "node scripts/smoke.mjs",
+    "ci": "npm run typecheck && npm run lint && npm test && npm run smoke"
   },
   "devDependencies": {
     "typescript": "^5.5.4"
