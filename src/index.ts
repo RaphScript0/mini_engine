@@ -1,3 +1,1 @@
-// Repo bootstrap placeholder.
-// Phase 1 contracts will live under src/core/*.
-export {};
+export * from "./core/index.js";
