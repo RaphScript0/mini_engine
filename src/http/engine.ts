@@ -1,24 +1,19 @@
-import {
-  MemorySearchEngine,
-  MemoryInvertedIndex,
-  MemoryTrie,
-  SimpleTokenizer,
-  TfIdfRanker,
-  MinHeapTopKSelector,
-  type SearchOptions,
-} from "../core/impl/index.js";
-
 export interface EngineDocumentInput {
   id: string;
   text: string;
   metadata?: Record<string, unknown>;
 }
 
+export interface SearchMode {
+  mode: "fulltext" | "prefix";
+}
+
 export interface SearchQuery {
   query: string;
   topK: number;
   mode: "fulltext" | "prefix";
-  cursor?: string;
+  cursorOffset?: number;
+  filtersEquals?: Record<string, string | number | boolean>;
 }
 
 export interface SearchHit {
@@ -34,72 +29,39 @@ export interface SearchResponse {
 
 export interface Engine {
   upsert(doc: EngineDocumentInput): void;
-  upsertMany(docs: EngineDocumentInput[]): void;
   has(id: string): boolean;
   search(q: SearchQuery): SearchResponse;
 }
 
-/**
- * HTTP-friendly cursor encoding.
- *
- * We store and return the engine's cursor token as-is, but wrap it in JSON so we can
- * extend later without breaking clients.
- */
-export function encodeCursor(payload: { token: string }): string {
-  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
-}
-
-export function decodeCursor(cursor: string): { token: string } {
-  const raw = Buffer.from(cursor, "base64").toString("utf8");
-  const parsed = JSON.parse(raw) as { token?: unknown };
-  if (typeof parsed.token !== "string" || !parsed.token.length) {
-    throw new Error("invalid cursor");
-  }
-  return { token: parsed.token };
-}
-
 export function createInMemoryEngine(): Engine {
-  const tokenizer = new SimpleTokenizer();
-  const index = new MemoryInvertedIndex();
-  const trie = new MemoryTrie();
-  const ranker = new TfIdfRanker();
-  const topK = new MinHeapTopKSelector<import("../core/types.js").SearchHit>();
-
-  const engine = new MemorySearchEngine({ tokenizer, index, trie, ranker, topK });
   const docs = new Map<string, EngineDocumentInput>();
 
   return {
     upsert(doc) {
       docs.set(doc.id, doc);
-      engine.upsertDocuments([{ id: doc.id, text: doc.text, fields: doc.metadata }]);
-    },
-    upsertMany(input) {
-      for (const d of input) docs.set(d.id, d);
-      engine.upsertDocuments(input.map((d) => ({ id: d.id, text: d.text, fields: d.metadata })));
     },
     has(id) {
       return docs.has(id);
     },
     search(q) {
-      const options: SearchOptions = {
-        limit: q.topK,
-        enablePrefix: q.mode === "prefix",
-      };
-
-      if (q.cursor) {
-        options.cursor = q.cursor;
-      }
-
-      const page = engine.search(q.query, options);
-
-      return {
-        results: page.hits.map((h) => ({
-          id: h.docId,
-          score: h.score,
-          metadata: (docs.get(h.docId)?.metadata ?? undefined) as Record<string, unknown> | undefined,
-        })),
-        nextCursor: page.nextCursor ?? null,
-      };
+      // stub: returns nothing, but pagination plumbing works.
+      const offset = q.cursorOffset ?? 0;
+      const results: SearchHit[] = [];
+      const nextCursor = offset + q.topK < results.length ? encodeCursor({ offset: offset + q.topK }) : null;
+      return { results: results.slice(offset, offset + q.topK), nextCursor };
     },
   };
+}
+
+export function encodeCursor(payload: { offset: number }): string {
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+}
+
+export function decodeCursor(cursor: string): { offset: number } {
+  const raw = Buffer.from(cursor, "base64").toString("utf8");
+  const parsed = JSON.parse(raw) as { offset?: unknown };
+  if (typeof parsed.offset !== "number" || !Number.isInteger(parsed.offset) || parsed.offset < 0) {
+    throw new Error("invalid cursor");
+  }
+  return { offset: parsed.offset };
 }
