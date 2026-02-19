@@ -4,3 +4,5 @@ export * from "./invertedIndex.js";
 export * from "./trie.js";
 export * from "./ranker.js";
 export * from "./heap.js";
+
+export * from "./impl/index.js";
