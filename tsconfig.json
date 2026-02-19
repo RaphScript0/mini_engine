@@ -9,5 +9,6 @@
     "rootDir": "src",
     "skipLibCheck": true
   },
-  "include": ["src", "docs"]
+  "include": ["src", "docs"],
+  "exclude": ["src/**/__tests__/**"]
 }
